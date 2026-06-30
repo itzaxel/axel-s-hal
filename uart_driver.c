@@ -1,15 +1,41 @@
 #include "uart_driver.h"
+#define TIMEOUT 10
 
 volatile uint8_t UART1_DMA_RX_State = 0;
 volatile uint8_t UART1_DMA_TX_State = 0;
 
-void UART_Transmit(USART_TypeDef *port, uint8_t *data, uint32_t len) {
-    if (data == NULL) return;
+UART_Condition UART_Transmit(USART_TypeDef *port, uint8_t *data, uint32_t len) {
+    if (data == NULL) return BUF_EMPTY;
     for (uint32_t i = 0; i < len; i++) {
-        while (!LL_USART_IsActiveFlag_TXE(port)) {}
+        uint32_t tick = HAL_GetTick();
+        while (!LL_USART_IsActiveFlag_TXE(port)){
+            if (HAL_GetTick()-tick>TIMEOUT) {return UART_TIMEOUT;}
+        }
         LL_USART_TransmitData8(port, *data++);
     }
-    while (!LL_USART_IsActiveFlag_TC(port));
+    uint32_t tick = HAL_GetTick();
+    while (!LL_USART_IsActiveFlag_TC(port)){
+        if (HAL_GetTick()-tick>TIMEOUT) {return UART_TIMEOUT;}
+    }
+    return UART_OK;
+}
+
+UART_Condition UART_Receive(USART_TypeDef *port, uint8_t *output, uint32_t len) {
+    if (output == NULL) return BUF_EMPTY;
+    for (uint32_t i = 0; i < len; i++) {
+        uint32_t tick = HAL_GetTick();
+        while (!LL_USART_IsActiveFlag_RXNE(port))
+        {
+            if (HAL_GetTick()-tick>TIMEOUT) {return UART_TIMEOUT;}
+        }
+        if (LL_USART_IsActiveFlag_ORE(port)) {
+            LL_USART_ClearFlag_ORE(port);
+            return UART_ERROR;
+        }
+
+        output[i] = LL_USART_ReceiveData8(port);
+    }
+    return UART_OK;
 }
 
 void UART1_Receive_DMA(uint8_t *buffer, uint32_t size) {
@@ -23,9 +49,6 @@ void UART1_Receive_DMA(uint8_t *buffer, uint32_t size) {
     LL_DMA_SetPeriphAddress(DMA2, LL_DMA_STREAM_2, LL_USART_DMA_GetRegAddr(USART1));
     LL_DMA_SetDataLength(DMA2, LL_DMA_STREAM_2, size);
 
-    // Uncomment these lines if STM32CubeMX did not handle DMA
-    // LL_DMA_EnableIT_TC(DMA2, LL_DMA_STREAM_2);
-    // LL_DMA_EnableIT_HT(DMA2, LL_DMA_STREAM_2);
 
     LL_DMA_EnableStream(DMA2, LL_DMA_STREAM_2);
     LL_USART_EnableDMAReq_RX(USART1);
@@ -41,32 +64,42 @@ void UART1_Transmit_DMA(uint8_t *buffer, uint16_t size) {
     LL_DMA_SetPeriphAddress(DMA2, LL_DMA_STREAM_7, LL_USART_DMA_GetRegAddr(USART1));
     LL_DMA_SetDataLength(DMA2, LL_DMA_STREAM_7, size);
 
-    // Uncomment these lines if STM32CubeMX did not handle DMA
-    // LL_DMA_EnableIT_TC(DMA2, LL_DMA_STREAM_7);
-    // LL_DMA_EnableIT_HT(DMA2, LL_DMA_STREAM_7);
-
     LL_DMA_EnableStream(DMA2, LL_DMA_STREAM_7);
     LL_USART_EnableDMAReq_TX(USART1);
 }
 
-void UART1_SetBaudRate(uint32_t baud) {
+UART_Condition UART_SetBaudRate(uint32_t baud, USART_TypeDef *port) {
     LL_RCC_ClocksTypeDef rcc_clocks;
     LL_RCC_GetSystemClocksFreq(&rcc_clocks);
+    uint32_t clock = 0;
+    if (port == USART1 || port == USART6)
+    {
+        clock = rcc_clocks.PCLK2_Frequency;
+    }else
+    {
+        clock = rcc_clocks.PCLK1_Frequency;
+    }
     if (baud == LL_USART_GetBaudRate(
-      USART1,
-      rcc_clocks.PCLK2_Frequency,
+      port,
+      clock,
       LL_USART_OVERSAMPLING_16 )
-      ) {return;}
-
-    while (!LL_USART_IsActiveFlag_TC(USART1)) {}
-    LL_USART_Disable(USART1);
+      ) {return UART_OK;}
+    uint32_t tick = HAL_GetTick();
+    while (!LL_USART_IsActiveFlag_TC(port)){
+        if (HAL_GetTick()-tick>TIMEOUT){
+            return UART_TIMEOUT;
+        }
+    }
+    LL_USART_Disable(port);
     LL_USART_SetBaudRate(
-      USART1,
-      rcc_clocks.PCLK2_Frequency,
+      port,
+      clock,
       LL_USART_OVERSAMPLING_16,
       baud);
-    LL_USART_Enable(USART1);
+    LL_USART_Enable(port);
+    return UART_OK;
 }
+
 
 // for 1-wire
 void LSB_Encode(uint8_t byte, uint8_t *out_buffer) {
@@ -79,7 +112,7 @@ void LSB_Encode(uint8_t byte, uint8_t *out_buffer) {
     }
 }
 
-uint8_t LSB_Decode(uint8_t *ow_rx_buffer) {
+uint8_t LSB_Decode(const uint8_t *ow_rx_buffer) {
     uint8_t byte = 0x00;
     for (int i = 0; i < 8; i++) {
         byte>>=1;
